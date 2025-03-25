@@ -1,0 +1,9 @@
+python autodl-tmp/mmyolo/demo/image_demo.py \
+    autodl-tmp/mmyolo/data/07.jpg \
+    work_dirs/remdet_sardet2/remdet_sardet2.py \
+    work_dirs/remdet_sardet2/best_coco_bbox_mAP_epoch_299.pth \
+    --device cuda \
+    --out-dir work_dirs/remdet_sardet2/inference_results/
+
+
+python demo/image_demo.py ./data/Drink_284_Detection_coco/images/DSC_3592.jpg rtmdet_tiny_1xb12-40e_drinks.py --weights work_dirs/rtmdet_tiny_1xb12-40e

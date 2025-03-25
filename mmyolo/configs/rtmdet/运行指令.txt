@@ -1,0 +1,9 @@
+python autodl-tmp/mmyolo/tools/train.py autodl-tmp/mmyolo/configs/rtmdet/remdet_sardet2.py
+
+查看显卡占用nvitop
+
+可视化对比 python autodl-tmp/mmyolo/demo/featmap_vis_demo.py autodl-tmp/mmyolo/data/SmallDataset_2/images/train/0007363.jpg \
+                                autodl-tmp/mmyolo/configs/rtmdet/remdet_sardet2.py \
+                                work_dirs/remdet_sardet2/best-minidataset+SKAttention300/best_coco_bbox_mAP_epoch_281.pth \
+                                --target-layers backbone \
+                                --channel-reduction squeeze_mean
