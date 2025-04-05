@@ -8,14 +8,47 @@ from mmdet.models.losses.utils import weight_reduce_loss
 from mmdet.structures.bbox import HorizontalBoxes
 
 from mmyolo.registry import MODELS
+class WIoU_Scale:
+    ''' monotonous: {
+            None: origin v1
+            True: monotonic FM v2
+            False: non-monotonic FM v3
+        }
+        momentum: The momentum of running mean'''
 
+    iou_mean = 1.
+    monotonous = False
+    _momentum = 1 - 0.5 ** (1 / 7000)
+    _is_train = True
+
+    def __init__(self, iou):
+        self.iou = iou
+        self._update(self)
+
+    @classmethod
+    def _update(cls, self):
+        if cls._is_train: cls.iou_mean = (1 - cls._momentum) * cls.iou_mean + \
+                                         cls._momentum * self.iou.detach().mean().item()
+
+    @classmethod
+    def _scaled_loss(cls, self, gamma=1.9, delta=3):
+        if isinstance(self.monotonous, bool):
+            if self.monotonous:
+                return (self.iou.detach() / self.iou_mean).sqrt()
+            else:
+                beta = self.iou.detach() / self.iou_mean
+                alpha = delta * torch.pow(gamma, beta - delta)
+                return beta / alpha
+        return 1
 
 def bbox_overlaps(pred: torch.Tensor,
                   target: torch.Tensor,
                   iou_mode: str = 'ciou',
                   bbox_format: str = 'xywh',
                   siou_theta: float = 4.0,
-                  eps: float = 1e-7) -> torch.Tensor:
+                  gamma: float = 0.5,
+                  eps: float = 1e-7,
+                  focal: bool = False,) -> torch.Tensor:
     r"""Calculate overlap between two set of bboxes.
     `Implementation of paper `Enhancing Geometric Factors into
     Model Learning and Inference for Object Detection and Instance
@@ -33,7 +66,7 @@ def bbox_overlaps(pred: torch.Tensor,
         pred (Tensor): Predicted bboxes of format (x1, y1, x2, y2)
             or (x, y, w, h),shape (n, 4).
         target (Tensor): Corresponding gt bboxes, shape (n, 4).
-        iou_mode (str): Options are ('iou', 'ciou', 'giou', 'siou', 'innerciou').
+        iou_mode (str): Options are ('iou', 'ciou', 'giou', 'siou').
             Defaults to "ciou".
         bbox_format (str): Options are "xywh" and "xyxy".
             Defaults to "xywh".
@@ -44,7 +77,7 @@ def bbox_overlaps(pred: torch.Tensor,
     Returns:
         Tensor: shape (n, ).
     """
-    assert iou_mode in ('iou', 'ciou', 'giou', 'siou', 'innerciou','eiou')
+    assert iou_mode in ('iou', 'ciou', 'giou', 'siou','diou','eiou','innersiou','innerciou','shapeiou','wiou')
     assert bbox_format in ('xyxy', 'xywh')
     if bbox_format == 'xywh':
         pred = HorizontalBoxes.cxcywh_to_xyxy(pred)
@@ -102,8 +135,15 @@ def bbox_overlaps(pred: torch.Tensor,
         with torch.no_grad():
             alpha = wh_ratio / (wh_ratio - ious + (1 + eps))
 
-        # CIoU
-        ious = ious - ((rho2 / enclose_area) + (alpha * wh_ratio))
+        if focal:
+            # focal-CIOU
+            ious = torch.pow(ious, gamma)*(ious - ((rho2 / enclose_area) + (alpha * wh_ratio)))
+            # cious = ious - ((rho2 / enclose_area) + (alpha * wh_ratio))
+
+            # return cious, ious, gamma
+        else:
+            #CIOU
+            ious = ious - ((rho2 / enclose_area) + (alpha * wh_ratio))
 
     elif iou_mode == 'giou':
         # GIoU = IoU - ( (A_c - union) / A_c )
@@ -147,7 +187,76 @@ def bbox_overlaps(pred: torch.Tensor,
                                    1 - torch.exp(-1 * omiga_h), siou_theta)
 
         ious = ious - ((distance_cost + shape_cost) * 0.5)
-        
+    elif iou_mode == 'diou':
+        # CIoU = IoU - ( (ρ^2(b_pred,b_gt) / c^2) + (alpha x v) )
+
+        # calculate enclose area (c^2)
+        enclose_area = enclose_w**2 + enclose_h**2 + eps
+
+        # calculate ρ^2(b_pred,b_gt):
+        # euclidean distance between b_pred(bbox2) and b_gt(bbox1)
+        # center point, because bbox format is xyxy -> left-top xy and
+        # right-bottom xy, so need to / 4 to get center point.
+        rho2_left_item = ((bbox2_x1 + bbox2_x2) - (bbox1_x1 + bbox1_x2))**2 / 4
+        rho2_right_item = ((bbox2_y1 + bbox2_y2) -
+                           (bbox1_y1 + bbox1_y2))**2 / 4
+        rho2 = rho2_left_item + rho2_right_item  # rho^2 (ρ^2)
+        ious = ious - ((rho2 / enclose_area))
+    elif iou_mode == "eiou":
+
+        # CIoU = IoU - ( (ρ^2(b_pred,b_gt) / c^2) + (alpha x v) )
+
+        # calculate enclose area (c^2)
+        enclose_area = enclose_w**2 + enclose_h**2 + eps
+
+        # calculate ρ^2(b_pred,b_gt):
+        # euclidean distance between b_pred(bbox2) and b_gt(bbox1)
+        # center point, because bbox format is xyxy -> left-top xy and
+        # right-bottom xy, so need to / 4 to get center point.
+        rho2_left_item = ((bbox2_x1 + bbox2_x2) - (bbox1_x1 + bbox1_x2))**2 / 4
+        rho2_right_item = ((bbox2_y1 + bbox2_y2) -
+                           (bbox1_y1 + bbox1_y2))**2 / 4
+        rho2 = rho2_left_item + rho2_right_item  # rho^2 (ρ^2)
+        rho_w2 = ((bbox2_x2 - bbox2_x1) - (bbox1_x2 - bbox1_x1)) ** 2
+        rho_h2 = ((bbox2_y2 - bbox2_y1) - (bbox1_y2 - bbox1_y1)) ** 2
+        cw2 = enclose_w ** 2 + eps
+        ch2 = enclose_h ** 2 + eps
+        ious = ious - (rho2 / enclose_area + rho_w2 / cw2 + rho_h2 / ch2)
+    elif iou_mode == "innersiou":
+        ratio=1.0
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
+        x1 = bbox1_x1 + w1_
+        y1 = bbox1_y1 + h1_
+        x2 = bbox2_x1 + w2_
+        y2 = bbox2_y1 + h2_
+
+        inner_b1_x1, inner_b1_x2, inner_b1_y1, inner_b1_y2 = x1 - w1_ * ratio, x1 + w1_ * ratio, \
+                                                             y1 - h1_ * ratio, y1 + h1_ * ratio
+        inner_b2_x1, inner_b2_x2, inner_b2_y1, inner_b2_y2 = x2 - w2_ * ratio, x2 + w2_ * ratio, \
+                                                             y2 - h2_ * ratio, y2 + h2_ * ratio
+        inner_inter = (torch.min(inner_b1_x2, inner_b2_x2) - torch.max(inner_b1_x1, inner_b2_x1)).clamp(0) * \
+                      (torch.min(inner_b1_y2, inner_b2_y2) - torch.max(inner_b1_y1, inner_b2_y1)).clamp(0)
+        inner_union = w1 * ratio * h1 * ratio + w2 * ratio * h2 * ratio - inner_inter + eps
+        inner_iou = inner_inter / inner_union
+
+        cw = torch.max(bbox1_x2, bbox2_x2) - torch.min(bbox1_x1, bbox2_x1)  # convex width
+        ch = torch.max(bbox1_y2, bbox2_y2) - torch.min(bbox1_y1, bbox2_y1)  # convex height
+        s_cw = (bbox2_x1 + bbox2_x2 - bbox1_x1 - bbox1_x2) * 0.5 + eps
+        s_ch = (bbox2_y1 + bbox2_y2 - bbox1_y1 - bbox1_y2) * 0.5 + eps
+        sigma = torch.pow(s_cw ** 2 + s_ch ** 2, 0.5)
+        sin_alpha_1 = torch.abs(s_cw) / sigma
+        sin_alpha_2 = torch.abs(s_ch) / sigma
+        threshold = pow(2, 0.5) / 2
+        sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
+        angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+        rho_x = (s_cw / cw) ** 2
+        rho_y = (s_ch / ch) ** 2
+        gamma = angle_cost - 2
+        distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+        omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
+        omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
+        shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+        ious = inner_iou - 0.5 * (distance_cost + shape_cost)
     elif iou_mode == "innerciou":
         ratio=1.0
         w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
@@ -188,27 +297,47 @@ def bbox_overlaps(pred: torch.Tensor,
 
         # innerCIoU
         ious = inner_iou - ((rho2 / enclose_area) + (alpha * wh_ratio))
-        
-    elif iou_mode == "eiou":
+    elif iou_mode == "shapeiou":
+        scale = 0
+        # Shape-Distance    #Shape-Distance    #Shape-Distance    #Shape-Distance    #Shape-Distance    #Shape-Distance    #Shape-Distance
+        ww = 2 * torch.pow(w2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+        hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+        cw = torch.max(bbox1_x2, bbox2_x2) - torch.min(bbox1_x1, bbox2_x1)  # convex width
+        ch = torch.max(bbox1_y2, bbox2_y2) - torch.min(bbox1_y1, bbox2_y1)  # convex height
+        c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+        center_distance_x = ((bbox2_x1 + bbox2_x2 - bbox1_x1 - bbox1_x2) ** 2) / 4
+        center_distance_y = ((bbox2_y1 + bbox2_y2 - bbox1_y1 - bbox1_y2) ** 2) / 4
+        center_distance = hh * center_distance_x + ww * center_distance_y
+        distance = center_distance / c2
 
+        # Shape-Shape    #Shape-Shape    #Shape-Shape    #Shape-Shape    #Shape-Shape    #Shape-Shape    #Shape-Shape    #Shape-Shape
+        omiga_w = hh * torch.abs(w1 - w2) / torch.max(w1, w2)
+        omiga_h = ww * torch.abs(h1 - h2) / torch.max(h1, h2)
+        shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+
+        # Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU    #Shape-IoU
+
+
+
+        ious = ious - distance - 0.5 * (shape_cost)
+    elif iou_mode == "wiou":
         # CIoU = IoU - ( (ρ^2(b_pred,b_gt) / c^2) + (alpha x v) )
+            enclose_area = enclose_w**2 + enclose_h**2 + eps
 
-        # calculate enclose area (c^2)
-        enclose_area = enclose_w**2 + enclose_h**2 + eps
+            # calculate ρ^2(b_pred,b_gt):
+            # euclidean distance between b_pred(bbox2) and b_gt(bbox1)
+            # center point, because bbox format is xyxy -> left-top xy and
+            # right-bottom xy, so need to / 4 to get center point.
+            rho2_left_item = ((bbox2_x1 + bbox2_x2) - (bbox1_x1 + bbox1_x2))**2 / 4
+            rho2_right_item = ((bbox2_y1 + bbox2_y2) -
+                               (bbox1_y1 + bbox1_y2))**2 / 4
+            rho2 = rho2_left_item + rho2_right_item  # rho^2 (ρ^2)
+            obj = WIoU_Scale(ious)
+            wise_iou_loss1 = getattr(obj,'_scaled_loss')(obj)
+            wise_iou_loss2 = (1-ious)* torch.exp((rho2 / enclose_area))
 
-        # calculate ρ^2(b_pred,b_gt):
-        # euclidean distance between b_pred(bbox2) and b_gt(bbox1)
-        # center point, because bbox format is xyxy -> left-top xy and
-        # right-bottom xy, so need to / 4 to get center point.
-        rho2_left_item = ((bbox2_x1 + bbox2_x2) - (bbox1_x1 + bbox1_x2))**2 / 4
-        rho2_right_item = ((bbox2_y1 + bbox2_y2) -
-                           (bbox1_y1 + bbox1_y2))**2 / 4
-        rho2 = rho2_left_item + rho2_right_item  # rho^2 (ρ^2)
-        rho_w2 = ((bbox2_x2 - bbox2_x1) - (bbox1_x2 - bbox1_x1)) ** 2
-        rho_h2 = ((bbox2_y2 - bbox2_y1) - (bbox1_y2 - bbox1_y1)) ** 2
-        cw2 = enclose_w ** 2 + eps
-        ch2 = enclose_h ** 2 + eps
-        ious = ious - (rho2 / enclose_area + rho_w2 / cw2 + rho_h2 / ch2)
+            return wise_iou_loss1,wise_iou_loss2,ious.clamp(min=-1.0, max=1.0)
+
     return ious.clamp(min=-1.0, max=1.0)
 
 
@@ -234,17 +363,18 @@ class IoULoss(nn.Module):
                  eps: float = 1e-7,
                  reduction: str = 'mean',
                  loss_weight: float = 1.0,
+                 focal: bool = False,
                  return_iou: bool = True):
         super().__init__()
         assert bbox_format in ('xywh', 'xyxy')
-        assert iou_mode in ('ciou', 'siou', 'giou', 'innerciou','eiou')
+        assert iou_mode in ('ciou', 'siou', 'giou','diou','eiou','innersiou','innerciou','shapeiou','wiou')
         self.iou_mode = iou_mode
         self.bbox_format = bbox_format
         self.eps = eps
         self.reduction = reduction
         self.loss_weight = loss_weight
         self.return_iou = return_iou
-
+        self.focal = focal
     def forward(
         self,
         pred: torch.Tensor,
@@ -284,7 +414,14 @@ class IoULoss(nn.Module):
             iou_mode=self.iou_mode,
             bbox_format=self.bbox_format,
             eps=self.eps)
-        loss = self.loss_weight * weight_reduce_loss(1.0 - iou, weight,
+        if type(iou) is tuple:
+            loss = self.loss_weight * weight_reduce_loss(1.0 - iou[2], weight,
+                                                         reduction, avg_factor)
+            loss += weight_reduce_loss((iou[0]*iou[1]).mean(),weight,
+                                       reduction,avg_factor)
+            iou = iou[2]
+        else:
+            loss = self.loss_weight * weight_reduce_loss(1.0 - iou, weight,
                                                      reduction, avg_factor)
 
         if self.return_iou:

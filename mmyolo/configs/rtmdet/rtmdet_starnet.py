@@ -31,56 +31,45 @@ num_epochs_stage2 = 5
 # 根据单卡训练的 batch 大小计算学习率
 base_lr = 12 * 0.004 / (32 * 8)
 num_det_layers = 3
+env_cfg = dict(cudnn_benchmark=True)
 
-# 如需采用 COCO 预训练权重，可根据需要设置 load_from（也可以直接使用基准配置中的预训练权重）
+# StarNet配置 - 基于源码正确计算输出通道
+base_dim = 24  # 根据你的配置
+depths = [1, 2, 6, 2]  # 根据你的配置
 
-#load_from = 'https://download.openmmlab.com/mmyolo/v3.0/rtmdet/rtmdet_s_syncbn_fast_8xb32-300e_coco/rtmdet_s_syncbn_fast_8xb32-300e_coco_20221230_182329-8a9e1443.pth'
+# 根据StarNet源码分析，真实输出通道是:
+# 从源码看，每个stage的输出通道为 base_dim * 2^i
+# StarNet各阶段输出通道为: [48, 96, 192]
+starnet_channels = [base_dim * 2**(i+1) for i in range(3)]  # [48, 96, 192]
+
+# 修改模型配置，只替换backbone
 model = dict(
-    # 冻结前3个stage的权重（加速训练）
-    backbone=dict(
-        ## 修改部分
-        frozen_stages=2,
+   backbone=dict(
+        _delete_=True, # 将 _base_ 中关于 backbone 的字段删除
+        type='mmdet.PyramidVisionTransformerV2', # 使用 mmdet 中的 PyramidVisionTransformerV2
+        embed_dims=32,
+        num_layers=[2, 2, 2, 2],
+        out_indices =(1, 2, 3), #设置PyramidVisionTransformerv2输出的stage，这里设置为1,2,3，默认为(0,1,2,3)
+        init_cfg=dict(type='Pretrained', checkpoint=checkpoint_file)),
         plugins=[
             dict(cfg=dict(type='SKAttention'),
                  stages=(False, False, False, True))
         ]
     ),
-
-    # 头部模块调整，同时增加损失函数部分内容
+    # 确保neck接收的通道数与backbone输出匹配
+    neck=dict(
+        in_channels=starnet_channels,  # [48, 96, 192]
+    ),
+    # 确保bbox_head配置正确
     bbox_head=dict(
-        head_module=dict(
-            num_classes=num_classes
-        )
-        #loss_bbox=dict(
-        #    type='IoULoss',
-        #    iou_mode='innerciou',
-        #    bbox_format='xywh',
-        #    eps=1e-7,
-        #    reduction='mean',
-        #    loss_weight=2.0,
-        #   return_iou=False
-        #)
+        head_module=dict(num_classes=num_classes)  # 更新类别数
     )
 )
-# 数据加载器配置，假设训练和验证的标注文件分别为 train_coco.json 与 val_coco.json，
-train_pipeline = [
-    dict(type='LoadImageFromFile'),  # 加载图片
-    dict(type='LoadAnnotations', with_bbox=True),  # 加载标签
-    dict(type='Resize', scale=(640, 640), keep_ratio=True),  # 调整大小
-    dict(type='RandomFlip', flip_ratio=0.5, direction='horizontal'),  # 随机翻转
-    dict(type='PhotoMetricDistortion'),  # 颜色变换
-    dict(type='RandomCrop', crop_size=(300, 300), allow_negative_crop=True),  # 随机裁剪
-    dict(type='CutOut', n_holes=1, cutout_shape=(50, 50)),  # Cutout
-    dict(type='Normalize', mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),  # 归一化
-    dict(type='Pad', size_divisor=32),  # 填充到 32 的倍数
-    dict(type='DefaultFormatBundle'),  # 数据格式转换
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])  # 数据收集
-]
 
+# 使用原配置的数据加载器和pipeline，只修改数据集相关的设置
 train_dataloader = dict(
     batch_size=train_batch_size_per_gpu,
     num_workers=train_num_workers,
-    pin_memory=False,
     dataset=dict(
         data_root=data_root,
         metainfo=metainfo,
@@ -88,7 +77,6 @@ train_dataloader = dict(
         data_prefix=dict(img='images/train/')
     )
 )
-
 
 val_dataloader = dict(
     batch_size=val_batch_size_per_gpu,
@@ -102,36 +90,28 @@ val_dataloader = dict(
 )
 
 test_dataloader = val_dataloader
-#test_dataloader = dict(
-#    batch_size=val_batch_size_per_gpu,
- #   num_workers=val_num_workers,
-  #  dataset=dict(
-   #     metainfo=metainfo,
-    #    data_root=data_root,
-     #   ann_file='annotations/test.json',
-      #  data_prefix=dict(img='images/test/')
-  #  )
-#)
+
 # 学习率调度器设置
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=1.0e-5,
+        start_factor=0.001,
         by_epoch=False,
         begin=0,
-        end=30
+        end=50
     ),
     dict(
         type='CosineAnnealingLR',
         eta_min=base_lr * 0.05,
-        begin=max_epochs // 2,
+        begin=max_epochs // 4,
         end=max_epochs,
-        T_max=max_epochs // 2,
+        T_max=max_epochs * 3 // 4,
         by_epoch=True,
         convert_to_iter_based=True
     ),
 ]
 
+# 优化器配置
 optim_wrapper = dict(optimizer=dict(lr=base_lr))
 
 # 切换 pipeline 的 epoch 时刻（对应第二阶段）

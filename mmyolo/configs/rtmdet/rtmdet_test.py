@@ -15,7 +15,12 @@ metainfo = {
     ]
 }
 num_classes = 6
-
+deepen_factor = _base_.deepen_factor
+widen_factor = 1.0
+# 修改通道设置方式
+channels_in = [64, 160, 256]
+channel_out = 256  # 设定一个固定的输出通道数，用于 neck 的 out_channels
+checkpoint_file = 'https://bgithub.xyz/whai362/PVT/releases/download/v2/pvt_v2_b0.pth'
 # 训练配置
 max_epochs = 300
 train_batch_size_per_gpu = 12
@@ -32,51 +37,51 @@ num_epochs_stage2 = 5
 base_lr = 12 * 0.004 / (32 * 8)
 num_det_layers = 3
 
-# 如需采用 COCO 预训练权重，可根据需要设置 load_from（也可以直接使用基准配置中的预训练权重）
-
-#load_from = 'https://download.openmmlab.com/mmyolo/v3.0/rtmdet/rtmdet_s_syncbn_fast_8xb32-300e_coco/rtmdet_s_syncbn_fast_8xb32-300e_coco_20221230_182329-8a9e1443.pth'
 model = dict(
-    # 冻结前3个stage的权重（加速训练）
     backbone=dict(
         ## 修改部分
-        frozen_stages=2,
-        plugins=[
-            dict(cfg=dict(type='SKAttention'),
-                 stages=(False, False, False, True))
-        ]
+        _delete_=True, # 将 _base_ 中关于 backbone 的字段删除
+        type='mmdet.PyramidVisionTransformerV2', # 使用 mmdet 中的 PyramidVisionTransformerV2
+        embed_dims=32,
+        num_layers=[2, 2, 2, 2],
+        out_indices=(1, 2, 3), #设置PyramidVisionTransformerv2输出的stage，这里设置为1,2,3
+        init_cfg=dict(type='Pretrained', checkpoint=checkpoint_file),
     ),
-
-    # 头部模块调整，同时增加损失函数部分内容
+    neck=dict(
+        # CSPNeXtPAFPN 需要单独的 in_channels 和 out_channels
+        deepen_factor=deepen_factor,
+        widen_factor=widen_factor,
+        in_channels=channels_in,  # 输入通道列表
+        out_channels=channel_out,  # 固定的输出通道数
+        dict(
+            type='mmdet.ChannelMapper',
+            in_channels=[256, 256, 256],  # 对应CSPNeXtPAFPN的三个输出
+            out_channels=256,
+        ),
+        # 自定义neck，包含SKAttention
+        dict(
+            type='SKAdapter',
+            in_channels=256,
+            reduction=8,
+        )
+    ),
     bbox_head=dict(
         head_module=dict(
-            num_classes=num_classes
-        )
+            num_classes=num_classes,
+            # 由于 neck 输出的通道数现在是 channel_out，所以 head 的输入通道也要相应调整
+            in_channels=channel_out,
+            widen_factor=widen_factor)#,
         #loss_bbox=dict(
         #    type='IoULoss',
-        #    iou_mode='innerciou',
+        #    iou_mode='eiou',
         #    bbox_format='xywh',
         #    eps=1e-7,
         #    reduction='mean',
-        #    loss_weight=2.0,
-        #   return_iou=False
+        #    loss_weight=3.0,  # 略微增加回归损失权重
+        #    return_iou=False
         #)
     )
 )
-# 数据加载器配置，假设训练和验证的标注文件分别为 train_coco.json 与 val_coco.json，
-train_pipeline = [
-    dict(type='LoadImageFromFile'),  # 加载图片
-    dict(type='LoadAnnotations', with_bbox=True),  # 加载标签
-    dict(type='Resize', scale=(640, 640), keep_ratio=True),  # 调整大小
-    dict(type='RandomFlip', flip_ratio=0.5, direction='horizontal'),  # 随机翻转
-    dict(type='PhotoMetricDistortion'),  # 颜色变换
-    dict(type='RandomCrop', crop_size=(300, 300), allow_negative_crop=True),  # 随机裁剪
-    dict(type='CutOut', n_holes=1, cutout_shape=(50, 50)),  # Cutout
-    dict(type='Normalize', mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),  # 归一化
-    dict(type='Pad', size_divisor=32),  # 填充到 32 的倍数
-    dict(type='DefaultFormatBundle'),  # 数据格式转换
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])  # 数据收集
-]
-
 train_dataloader = dict(
     batch_size=train_batch_size_per_gpu,
     num_workers=train_num_workers,
@@ -88,7 +93,6 @@ train_dataloader = dict(
         data_prefix=dict(img='images/train/')
     )
 )
-
 
 val_dataloader = dict(
     batch_size=val_batch_size_per_gpu,
@@ -102,16 +106,7 @@ val_dataloader = dict(
 )
 
 test_dataloader = val_dataloader
-#test_dataloader = dict(
-#    batch_size=val_batch_size_per_gpu,
- #   num_workers=val_num_workers,
-  #  dataset=dict(
-   #     metainfo=metainfo,
-    #    data_root=data_root,
-     #   ann_file='annotations/test.json',
-      #  data_prefix=dict(img='images/test/')
-  #  )
-#)
+
 # 学习率调度器设置
 param_scheduler = [
     dict(

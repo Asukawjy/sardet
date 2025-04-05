@@ -7,3 +7,25 @@ python autodl-tmp/mmyolo/tools/train.py autodl-tmp/mmyolo/configs/rtmdet/remdet_
                                 work_dirs/remdet_sardet2/best-minidataset+SKAttention300/best_coco_bbox_mAP_epoch_281.pth \
                                 --target-layers backbone \
                                 --channel-reduction squeeze_mean
+                                
+python autodl-tmp/mmyolo/tools/train.py autodl-tmp/mmyolo/configs/rtmdet/new.py --cfg-options runner.initial_epoch=300
+
+train_pipeline = [
+    dict(type='LoadImageFromFile'),  # 加载图片
+    dict(type='LoadAnnotations', with_bbox=True),  # 加载标签
+    dict(type='Resize', scale=(640, 640), keep_ratio=True),  # 调整大小
+    dict(type='RandomFlip', flip_ratio=0.5, direction='horizontal'),  # 随机翻转
+    dict(type='PhotoMetricDistortion'),  # 颜色变换
+    dict(type='RandomCrop', crop_size=(300, 300), allow_negative_crop=True),  # 随机裁剪
+    dict(type='CutOut', n_holes=1, cutout_shape=(50, 50)),  # Cutout
+    dict(type='Normalize', mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),  # 归一化
+    dict(type='Pad', size_divisor=32),  # 填充到 32 的倍数
+    dict(type='DefaultFormatBundle'),  # 数据格式转换
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])  # 数据收集
+]
+
+python autodl-tmp/mmyolo/tools/train.py autodl-tmp/mmyolo/configs/rtmdet/rtmdet_test.py && /usr/bin/shutdown
+
+python setup.py install
+
+https://bgithub.xyz/whai362/PVT/releases/download/v2/pvt_v2_b0.pth #github镜像
